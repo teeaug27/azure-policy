@@ -4975,3 +4975,100 @@
   "id": "/providers/Microsoft.Authorization/policySetDefinitions/06f19060-9e68-4070-92ca-f15cc126059e",
   "name": "06f19060-9e68-4070-92ca-f15cc126059e"
 }
+
+
+import csv
+import json
+import subprocess
+
+# Define the output file for the report
+output_file = "subscription_exemption_report.csv"
+# Define the specific Policy Definition ID to filter by
+target_policy_definition_id = "d7338377-f667-4573-a8ce"  # Replace with your target policy definition ID
+
+def run_azure_cli_command(command):
+    """Run an Azure CLI command and return the JSON output."""
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, universal_newlines=True)
+        return json.loads(result.stdout)
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred while running Azure CLI command: {e}")
+        print(e.stderr)
+        return None
+
+def list_subscriptions():
+    """List all subscriptions available to the account."""
+    return run_azure_cli_command(["az", "account", "list", "--query", "[].{Id:id, Name:name, State:state}"])
+
+def list_exemptions_for_subscription(subscription_id):
+    """List policy exemptions for a specific subscription."""
+    command = ["az", "policy", "exemption", "list", "--scope", f"/subscriptions/{subscription_id}", "--query", "[]"]
+    return run_azure_cli_command(command)
+
+def extract_exemption_details(exemption, subscription_id, subscription_name):
+    """Extract details from an exemption object."""
+    policy_assignment_id = exemption.get("properties", {}).get("policyAssignmentId", "")
+    policy_assignment_name = policy_assignment_id.split("/")[-1] if policy_assignment_id else "N/A"
+    policy_definition_id = policy_assignment_id.split("/")[-1] if policy_assignment_id else "N/A"
+    return {
+        "ExemptionDisplayName": exemption.get("properties", {}).get("displayName", "N/A"),
+        "PolicyDefinitionId": policy_definition_id,
+        "PolicyAssignment": policy_assignment_id,
+        "PolicyAssignmentName": policy_assignment_name,
+        "Scope": exemption.get("properties", {}).get("scope"),
+        "SubscriptionId": subscription_id,
+        "SubscriptionName": subscription_name,
+        "ExemptionCategory": exemption.get("properties", {}).get("exemptionCategory", "N/A"),
+        "ExpiresOn": exemption.get("properties", {}).get("expiresOn", "No Expiry")
+    }
+
+def main():
+    subscriptions = list_subscriptions()
+
+    if not subscriptions:
+        print("No subscriptions found or an error occurred.")
+        return
+
+    exemption_list = []
+
+    for subscription in subscriptions:
+        subscription_id = subscription['Id']
+        subscription_name = subscription['Name']
+        print(f"Checking subscription: {subscription_name} (ID: {subscription_id})")
+
+        # Set the Azure CLI context to the current subscription
+        subprocess.run(["az", "account", "set", "--subscription", subscription_id], check=True)
+
+        # List policy exemptions for the current subscription
+        exemptions = list_exemptions_for_subscription(subscription_id)
+        
+        if not exemptions:
+            print(f"No exemptions found for subscription: {subscription_name}")
+            continue
+
+        print(f"Total exemptions found in subscription {subscription_name}: {len(exemptions)}")
+        for exemption in exemptions:
+            exemption_details = extract_exemption_details(exemption, subscription_id, subscription_name)
+            
+            # Filter by target Policy Definition ID
+            if target_policy_definition_id in exemption_details['PolicyDefinitionId']:
+                exemption_list.append(exemption_details)
+
+    # Write data to CSV
+    if exemption_list:
+        with open(output_file, mode='w', newline='') as file:
+            writer = csv.DictWriter(file, fieldnames=[
+                "ExemptionDisplayName", "PolicyDefinitionId", "PolicyAssignment",
+                "PolicyAssignmentName", "Scope", "SubscriptionId", "SubscriptionName",
+                "ExemptionCategory", "ExpiresOn"
+            ])
+            writer.writeheader()
+            for exemption in exemption_list:
+                writer.writerow(exemption)
+
+        print(f"Exemption report saved to {output_file}")
+    else:
+        print(f"No exemptions found with Policy Definition ID {target_policy_definition_id} in any subscriptions.")
+
+if __name__ == "__main__":
+    main()
